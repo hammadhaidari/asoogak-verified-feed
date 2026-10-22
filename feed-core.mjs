@@ -127,5 +127,21 @@ export function proofAge(items, records, now, hotPopularity = HOT_POPULARITY) {
     }
     all.sort((a, b) => a - b); hot.sort((a, b) => a - b);
     const r = v => Math.round(v * 10) / 10;
-    return { checkedTitles: all.length, unproven, p50h: r(pct(all, 0.5)), p95h: r(pct(all, 0.95)), hotTitles: hot.length, hotP50h: r(pct(hot, 0.5)), hotP95h: r(pct(hot, 0.95)) };
+    return { checkedTitles: all.length, fresh24h: all.filter(age => age < 24).length, unproven, p50h: r(pct(all, 0.5)), p95h: r(pct(all, 0.95)), hotTitles: hot.length, hotP50h: r(pct(hot, 0.5)), hotP95h: r(pct(hot, 0.95)) };
+}
+
+/* The few numbers the TV's Settings page shows, in the TV's own terms. They ride inside the catalogue file the TV already
+   downloads, so Settings needs no extra network request. Everything here is something this repo actually measured. */
+export function feedSummary({ items, hidden, age, stats, now }) {
+    return {
+        at: now,
+        listedTitles: items.length,
+        freshTitles: age.fresh24h,                                  // listed titles this repo re-proved alive in the last 24h
+        removedLast24h: hidden.filter(entry => now - entry.at < 24 * HOUR).length,
+        hiddenNow: hidden.length,
+        popularTitles: age.hotTitles,
+        popularP95h: age.hotP95h,                                   // 95% of the most-watched titles were re-proven within this many hours
+        recheckedLastRun: Number(stats && stats.probed) || 0,
+        runners: Number(stats && stats.shards) || 0
+    };
 }

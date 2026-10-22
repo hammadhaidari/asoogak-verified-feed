@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { buildFeed, proofAge, keyOf } from './feed-core.mjs';
+import { buildFeed, proofAge, feedSummary, keyOf } from './feed-core.mjs';
 
 const SOURCE_URL = (process.env.SOURCE_CATALOGUE_URL || '').trim();
 const PREV_FEED_URL = (process.env.FEED_CATALOGUE_URL || '').trim();
@@ -60,6 +60,7 @@ async function main() {
     fs.writeFileSync(path.join(OUT, 'catalogue.json'), JSON.stringify({
         updatedAt: now, paginated: false, totalPlayable: feed.items.length, movieCount, tvCount,
         deepVerified: feed.items.filter(i => Number(i.verified_v) >= 2).length, episodeVerdicts: Object.keys(feed.publishedRecords).filter(k => k.includes(':s')).length,
+        summary: feedSummary({ items: feed.items, hidden: feed.hidden, age, stats, now }),
         records: feed.publishedRecords, items: feed.items, source: { updatedAt: source.updatedAt, totalPlayable: source.totalPlayable }
     }));
     const history = [...(Array.isArray(previousState.history) ? previousState.history : []), {

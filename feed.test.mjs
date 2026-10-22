@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildQueue, buildFeed, seasonsToProbe, titleVerdict, targetFor, proofAge, slimItem, hashKey, OVERVIEW_MAX, HOT_TARGET_MS, TAIL_TARGET_MS, MIN_RECHECK_MS, DEAD_RETAIN_MS } from './feed-core.mjs';
+import { feedSummary, buildQueue, buildFeed, seasonsToProbe, titleVerdict, targetFor, proofAge, slimItem, hashKey, OVERVIEW_MAX, HOT_TARGET_MS, TAIL_TARGET_MS, MIN_RECHECK_MS, DEAD_RETAIN_MS } from './feed-core.mjs';
 import { classifyResolver, lightProbe } from './light-check.mjs';
 import { resolverUrl } from './probe-shard.mjs';
 
@@ -122,4 +122,15 @@ test('feed: availability_at follows the freshest alive proof so the TV keeps tru
     assert.equal(feed.items[0].availability_at, NOW - 2 * H);
     const unproven = buildFeed({ scannerItems: [item], now: NOW });
     assert.equal(unproven.items[0].availability_at, item.availability_at);   // never invents a proof
+});
+
+test('summary for the TV: plain counts of what this repo really measured (fresh re-proofs, removals in 24h, popular-title freshness)', () => {
+    const items = [movie(1, 80), movie(2, 1), movie(3, 1)];
+    const records = { 'movie:1': { ok: true, at: NOW - 3 * H }, 'movie:2': { ok: true, at: NOW - 30 * H } };
+    const age = proofAge(items, records, NOW, 15);
+    assert.equal(age.fresh24h, 1); assert.equal(age.checkedTitles, 2);
+    const hidden = [{ key: 'movie:8', at: NOW - 2 * H }, { key: 'movie:9', at: NOW - 40 * H }];
+    const summary = feedSummary({ items, hidden, age, stats: { probed: 640, shards: 10 }, now: NOW });
+    assert.deepEqual(summary, { at: NOW, listedTitles: 3, freshTitles: 1, removedLast24h: 1, hiddenNow: 2, popularTitles: 1, popularP95h: 3, recheckedLastRun: 640, runners: 10 });
+    assert.equal(feedSummary({ items: [], hidden: [], age: proofAge([], {}, NOW), stats: null, now: NOW }).recheckedLastRun, 0);
 });
