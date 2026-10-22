@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import { Buffer } from 'node:buffer';
 import nacl from 'tweetnacl';
 import { buildQueue, seasonsToProbe, titleVerdict, keyOf } from './feed-core.mjs';
-import { lightProbe } from './light-check.mjs';
+import { lightProbe, verifyStreamSource } from './light-check.mjs';
 
 const SHARD = Math.max(0, Number(process.env.SHARD_INDEX || 0));
 const SHARD_TOTAL = Math.max(1, Number(process.env.SHARD_TOTAL || 12));
@@ -60,6 +60,11 @@ async function run() {
             if (result.state === 'limited') { stats.limited++; gap = Math.min(8000, Math.round(gap * 1.6)); cooldownUntil = Math.max(cooldownUntil, Date.now() + 3000 + attempt * 3000); continue; }
             gap = Math.max(350, Math.round(gap * 0.93)); stats.gapMs = gap;
             if (result.state === 'unknown') { await sleep(1000); continue; }
+            if (result.state === 'alive' && result.source) {
+                const cdn = await verifyStreamSource(result.source);
+                if (cdn.state === 'dead') return cdn;
+                if (cdn.state !== 'alive') { await sleep(800); continue; }
+            }
             return result;
         }
         return { state: 'unknown' };

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { feedSummary, buildQueue, buildFeed, seasonsToProbe, titleVerdict, targetFor, proofAge, slimItem, hashKey, OVERVIEW_MAX, HOT_TARGET_MS, TAIL_TARGET_MS, MIN_RECHECK_MS, DEAD_RETAIN_MS } from './feed-core.mjs';
-import { classifyResolver, lightProbe } from './light-check.mjs';
+import { classifyResolver, lightProbe, verifyStreamSource } from './light-check.mjs';
 import { resolverUrl } from './probe-shard.mjs';
 
 const H = 3600000, NOW = 1_000_000 * H;
@@ -133,4 +133,27 @@ test('summary for the TV: plain counts of what this repo really measured (fresh 
     const summary = feedSummary({ items, hidden, age, stats: { probed: 640, shards: 10 }, now: NOW });
     assert.deepEqual(summary, { at: NOW, listedTitles: 3, freshTitles: 1, removedLast24h: 1, hiddenNow: 2, popularTitles: 1, popularP95h: 3, recheckedLastRun: 640, runners: 10 });
     assert.equal(feedSummary({ items: [], hidden: [], age: proofAge([], {}, NOW), stats: null, now: NOW }).recheckedLastRun, 0);
+});
+
+test('CDN stream probe catches 403/404/428 dead streams, broken manifests, non-media HTML, and trailers', async () => {
+    assert.equal(classifyResolver(200, { stream: { playlist: 'https://cdn/x.mpd', playbackMetadata: { duration: 120 } } }).reason, 'too-short');
+    const chunkStream = buf => ({ getReader: () => { let done = false; return { read: async () => done ? { done: true } : (done = true, { done: false, value: buf }), cancel: async () => {} }; } });
+    const mpdOk = await verifyStreamSource({ url: 'https://sacdn.hakunaymatata.com/dash/1/index.mpd', type: 'dash', headers: { Cookie: 'CloudFront-Policy=p;CloudFront-Signature=s;CloudFront-Key-Pair-Id=k' } }, {
+        fetchImpl: async url => {
+            assert.match(url, /Policy=p.*Signature=s.*Key-Pair-Id=k/);
+            return { ok: true, status: 206, body: chunkStream(Buffer.from('<?xml version="1.0"?><MPD></MPD>')) };
+        }
+    });
+    assert.equal(mpdOk.state, 'alive');
+    const cdn403 = await verifyStreamSource({ url: 'https://sacdn.hakunaymatata.com/dash/1/index.mpd', type: 'dash' }, {
+        fetchImpl: async () => ({ ok: false, status: 403 })
+    });
+    assert.deepEqual(cdn403, { state: 'dead', reason: 'cdn-403' });
+    const badFile = await verifyStreamSource({ url: 'https://hcdn3.hakunaymatata.com/resource/a.mp4', type: 'mp4' }, {
+        fetchImpl: async url => {
+            assert.match(url, /^https:\/\/hcdn5\.hakunaymatata\.com\//);
+            return { ok: true, status: 200, headers: { get: () => 'text/html' }, body: chunkStream(Buffer.from('<html>403</html>'.padEnd(300))) };
+        }
+    });
+    assert.deepEqual(badFile, { state: 'dead', reason: 'not-media' });
 });
