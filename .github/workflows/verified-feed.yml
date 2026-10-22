@@ -1,0 +1,116 @@
+name: AsooGak Verified Feed (alive-only bridge)
+
+# Re-proves every title the catalogue scanner lists with ONE cheap request and publishes an alive-only list for the TV.
+# Starts after the scanner publishes (its runs end around :22/:52), reading its freshest list. Shares the account's ~20 runner
+# slots with the scanner (SCANNER_SHARDS + SHARDS should total 20 or less).
+on:
+  schedule:
+    - cron: '27,57 * * * *'
+  workflow_dispatch:
+    inputs:
+      duration_ms:
+        description: 'Probe window per shard (milliseconds)'
+        required: false
+        default: '1200000'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: asoogak-verified-feed
+  cancel-in-progress: false
+
+env:
+  SOURCE_CATALOGUE_URL: ${{ vars.SOURCE_CATALOGUE_URL || 'https://raw.githubusercontent.com/hammadhaidari/asoogak-catalogue-scanner/refs/heads/catalogue-data/catalogue.json' }}
+  FEED_CATALOGUE_URL: https://raw.githubusercontent.com/${{ github.repository }}/refs/heads/feed-data/catalogue.json
+  FEED_STATE_URL: https://raw.githubusercontent.com/${{ github.repository }}/refs/heads/feed-data/feed-state.json
+  SCAN_DURATION_MS: ${{ github.event.inputs.duration_ms || '1200000' }}
+
+jobs:
+  plan:
+    name: Plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      shards: ${{ steps.plan.outputs.shards }}
+    steps:
+      - id: plan
+        run: |
+          SHARDS="${{ vars.SHARDS || '10' }}"
+          echo "shards=$SHARDS" >> "$GITHUB_OUTPUT"
+          echo "matrix=$(node -e "console.log(JSON.stringify(Array.from({length:$SHARDS},(_,i)=>i)))")" >> "$GITHUB_OUTPUT"
+
+  probe:
+    name: Probe Shard ${{ matrix.shard }}
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 28
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix:
+        shard: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: package.json
+      - run: npm install --no-audit --no-fund
+      - name: Probe
+        env:
+          SHARD_INDEX: ${{ matrix.shard }}
+          SHARD_TOTAL: ${{ needs.plan.outputs.shards }}
+          RESOLVER_KEY: ${{ secrets.RESOLVER_KEY }}
+          PROXY_URL: ${{ secrets.PROXY_URL }}
+        run: node probe-shard.mjs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: probe-output-${{ matrix.shard }}
+          path: probe-output-${{ matrix.shard }}.json
+          retention-days: 1
+
+  publish:
+    name: Merge & Publish Verified Feed
+    needs: [plan, probe]
+    if: always() && needs.plan.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Download shard outputs
+        id: download
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Retry shard download
+        if: steps.download.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          for attempt in 1 2 3 4 5; do
+            rm -rf artifacts
+            if gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --dir artifacts; then exit 0; fi
+            sleep $((attempt * 20))
+          done
+          exit 1
+      - name: Merge
+        run: node merge-feed.mjs
+      - name: Publish to feed-data
+        run: |
+          cd dist
+          git init
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b feed-data
+          git add catalogue.json feed-state.json
+          git commit -m "Verified feed ($(date -u +'%Y-%m-%dT%H:%M:%SZ'))"
+          git push --force "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" feed-data
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

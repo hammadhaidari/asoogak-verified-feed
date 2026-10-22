@@ -1,0 +1,9 @@
+{
+  "name": "asoogak-verified-feed",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Alive-only bridge between the AsooGak catalogue scanner and the TV: re-proves every listed title with one cheap request and takes dead ones down within hours.",
+  "scripts": { "test": "node --test feed.test.mjs" },
+  "dependencies": { "tweetnacl": "^1.0.3" }
+}
