@@ -5,6 +5,7 @@ import { buildFeed, proofAge, feedSummary, keyOf } from './feed-core.mjs';
 const SOURCE_URL = (process.env.SOURCE_CATALOGUE_URL || '').trim();
 const PREV_FEED_URL = (process.env.FEED_CATALOGUE_URL || '').trim();
 const PREV_STATE_URL = (process.env.FEED_STATE_URL || '').trim();
+const TOMBSTONES_URL = (process.env.DEAD_TOMBSTONES_URL || 'https://asoogak-availability.cinejoy-tv-3274.workers.dev/dead-tombstones').trim();
 const ARTIFACTS = process.env.ARTIFACTS_DIR || 'artifacts';
 const OUT = process.env.OUTPUT_DIR || 'dist';
 const MAX_NEW_HIDDEN_SHARE = Number(process.env.MAX_NEW_HIDDEN_SHARE || 0.08);
@@ -35,23 +36,40 @@ async function main() {
     if (!source || !Array.isArray(source.items) || source.items.length < 1000) throw new Error('Scanner catalogue unavailable or too small; keeping the previous feed');
     const previousFeed = await getJson(PREV_FEED_URL, 90000);
     const previousState = (await getJson(PREV_STATE_URL, 90000)) || {};
+    const tombstonesPayload = await getJson(TOMBSTONES_URL, 15000);
+    const tombstoneRecords = {};
+    if (tombstonesPayload && tombstonesPayload.records && typeof tombstonesPayload.records === 'object') {
+        for (const [k, rec] of Object.entries(tombstonesPayload.records)) {
+            if (k === 'tv:331865' || k.startsWith('tv:331865:')) continue;
+            if (rec && rec.ok === false && Number.isFinite(rec.at) && now - rec.at < 7 * 86400000) {
+                tombstoneRecords[k] = { ok: false, at: rec.at, reason: rec.reason || 'tv-dead' };
+            }
+        }
+    }
+    const tombstoneOutputs = Object.keys(tombstoneRecords).length ? [{ records: tombstoneRecords, seasonDead: {} }] : [];
     const outputs = findOutputs(ARTIFACTS).map(file => { try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch (e) { return null; } }).filter(Boolean);
 
     const stats = { shards: outputs.length, probed: 0, alive: 0, dead: 0, limited: 0, unknown: 0, hotProbed: 0, seasonsDead: 0, left: 0 };
     for (const out of outputs) for (const name of Object.keys(stats)) if (name !== 'shards') stats[name] += Number(out.stats && out.stats[name]) || 0;
 
-    const feed = buildFeed({ scannerItems: source.items, scannerRecords: source.records || {}, previousItems: previousFeed && previousFeed.items || [], previousState, shardOutputs: outputs, now });
+    const feed = buildFeed({ scannerItems: source.items, scannerRecords: source.records || {}, previousItems: previousFeed && previousFeed.items || [], previousState, shardOutputs: [...tombstoneOutputs, ...outputs], now });
 
     // Safety valve: a run that suddenly hides far more than usual is a provider/network incident, not real removals.
     const previousHidden = new Set(Object.entries(previousFeed && previousFeed.records || {}).filter(([k, r]) => r && r.ok === false).map(([k]) => k));
-    const newlyHidden = feed.hidden.filter(h => !previousHidden.has(h.key));
+    const newlyHidden = feed.hidden.filter(h => !previousHidden.has(h.key) && !tombstoneRecords[h.key]);
     let anomaly = null;
     if (newlyHidden.length > Math.max(150, source.items.length * MAX_NEW_HIDDEN_SHARE)) {
         anomaly = `Run would newly hide ${newlyHidden.length} titles (> ${Math.round(MAX_NEW_HIDDEN_SHARE * 100)}%); not publishing this run's dead verdicts.`;
         console.error('ANOMALY: ' + anomaly);
-        // Keep previous feed's hidden set only; this run's fresh dead verdicts are discarded.
-        const safe = buildFeed({ scannerItems: source.items, scannerRecords: source.records || {}, previousItems: previousFeed && previousFeed.items || [], previousState, shardOutputs: [], now });
+        // Keep previous feed's hidden set + verified TV tombstones; this run's fresh shard dead verdicts are discarded.
+        const safe = buildFeed({ scannerItems: source.items, scannerRecords: source.records || {}, previousItems: previousFeed && previousFeed.items || [], previousState, shardOutputs: tombstoneOutputs, now });
         Object.assign(feed, safe);
+    }
+    const listedKeys = new Set(feed.items.map(keyOf));
+    for (const [k, rec] of Object.entries(tombstoneRecords)) {
+        if (!listedKeys.has(k) && !feed.publishedRecords[k]) {
+            feed.publishedRecords[k] = { ok: false, at: rec.at };
+        }
     }
 
     const movieCount = feed.items.filter(i => i.media_type === 'movie').length, tvCount = feed.items.length - movieCount;

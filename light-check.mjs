@@ -43,9 +43,105 @@ export function looksLikeMedia(bytes) {
     return false;
 }
 
+export function firstHlsChildUri(manifestText, hitEof = true) {
+    if (!manifestText) return null;
+    const lines = String(manifestText).split(/\r?\n/);
+    if (!hitEof && lines.length > 1) lines.pop();
+    for (const raw of lines) {
+        const line = raw.trim();
+        if (!line) continue;
+        if (!line.startsWith('#')) return line;
+    }
+    const completeText = lines.join('\n');
+    const mapMatch = completeText.match(/#EXT-X-MAP:[^\r\n]*URI="([^"]+)"/i);
+    return mapMatch ? mapMatch[1].trim() : null;
+}
+
+function resolveChildUrl(rawUri, parentUrl) {
+    if (!rawUri || rawUri.includes('$') || rawUri.includes('{$')) return null;
+    try {
+        const child = new URL(rawUri, parentUrl.href);
+        if (child.protocol !== 'https:') return null;
+        if (/^hcdn\d*\.hakunaymatata\.com$/i.test(child.hostname)) child.hostname = 'hcdn5.hakunaymatata.com';
+        if (child.hostname === parentUrl.hostname) {
+            for (const key of ['Policy', 'Signature', 'Key-Pair-Id', 'token', 'expires', 'hdnts']) {
+                if (parentUrl.searchParams.has(key) && !child.searchParams.has(key)) {
+                    child.searchParams.set(key, parentUrl.searchParams.get(key));
+                }
+            }
+        }
+        return child;
+    } catch (e) {
+        return null;
+    }
+}
+
+function buildProbeHeaders(urlObj, source, rangeSpec) {
+    const isHakunaDirect = urlObj.hostname.endsWith('hakunaymatata.com') && urlObj.hostname !== 'sacdn.hakunaymatata.com';
+    return isHakunaDirect
+        ? {
+            'User-Agent': (source && source.headers && (source.headers['User-Agent'] || source.headers['user-agent'])) || ONEROOM_UA,
+            Accept: '*/*',
+            Range: rangeSpec
+        }
+        : { ...HEADERS, Range: rangeSpec };
+}
+
+async function readPrefixBytes(res, maxBytes) {
+    const reader = res.body?.getReader?.();
+    if (!reader) return { bytes: null, hitEof: true };
+    const parts = [];
+    let size = 0;
+    let hitEof = false;
+    try {
+        while (size < maxBytes) {
+            const chunk = await reader.read();
+            if (chunk.done) { hitEof = true; break; }
+            parts.push(chunk.value);
+            size += chunk.value.byteLength;
+        }
+        return { bytes: Buffer.concat(parts.map(p => Buffer.from(p))), hitEof };
+    } finally {
+        try { await reader.cancel(); } catch (e) {}
+    }
+}
+
+function looksLikeBadSegment(bytes, contentType, isEncrypted) {
+    if (/text\/html|application\/json|application\/xml|text\/xml|text\/plain/i.test(contentType || '')) return true;
+    if (!bytes || bytes.length === 0) return true;
+    const head = Buffer.from(bytes.subarray(0, Math.min(bytes.length, 96))).toString('latin1').trimStart();
+    if (/^(?:<!doctype\s+html|<html\b|<head\b|<body\b|<\?xml\b|<Error\b|\{\s*"(?:error|message|status|code)"\s*:)/i.test(head)) return true;
+    if (!isEncrypted && bytes.length >= 188 && !looksLikeMedia(bytes)) return true;
+    return false;
+}
+
+async function probeMediaSegment(segUrl, source, isEncrypted, fetchImpl, timeoutMs) {
+    let segRes;
+    try {
+        segRes = await fetchImpl(segUrl.href, {
+            headers: buildProbeHeaders(segUrl, source, 'bytes=0-1023'),
+            signal: AbortSignal.timeout(timeoutMs),
+            redirect: 'follow'
+        });
+        if (segRes.status === 429) return { state: 'limited' };
+        if ([400, 401, 403, 404, 410, 416, 422, 428].includes(segRes.status)) return { state: 'dead', reason: 'seg-' + segRes.status };
+        if (!segRes.ok && segRes.status !== 206) return { state: 'unknown' };
+        const { bytes } = await readPrefixBytes(segRes, 1024);
+        if (!bytes) return { state: 'alive' };
+        if (looksLikeBadSegment(bytes, segRes.headers?.get?.('Content-Type'), isEncrypted)) {
+            return { state: 'dead', reason: 'bad-seg' };
+        }
+        return { state: 'alive' };
+    } catch (e) {
+        return { state: 'unknown' };
+    } finally {
+        try { await segRes?.body?.cancel?.(); } catch (e) {}
+    }
+}
+
 export async function verifyStreamSource(source, { fetchImpl = fetch, timeoutMs = 9000 } = {}) {
     if (!source || !source.url) return { state: 'dead', reason: 'no-stream' };
-    let res, reader;
+    let res;
     try {
         const target = new URL(source.url);
         if (target.protocol !== 'https:') return { state: 'dead', reason: 'insecure' };
@@ -60,45 +156,77 @@ export async function verifyStreamSource(source, { fetchImpl = fetch, timeoutMs 
                 if (mapped) target.searchParams.set(mapped, part.slice(sep + 1).trim());
             }
         }
-        const isHakunaDirect = target.hostname.endsWith('hakunaymatata.com') && target.hostname !== 'sacdn.hakunaymatata.com';
-        const probeHeaders = isHakunaDirect
-            ? {
-                'User-Agent': (source.headers && (source.headers['User-Agent'] || source.headers['user-agent'])) || ONEROOM_UA,
-                Accept: '*/*',
-                Range: 'bytes=0-4095'
-            }
-            : { ...HEADERS, Range: 'bytes=0-4095' };
+        const probeHeaders = buildProbeHeaders(target, source, 'bytes=0-8191');
         res = await fetchImpl(target.href, { headers: probeHeaders, signal: AbortSignal.timeout(timeoutMs), redirect: 'follow' });
         if (res.status === 429) return { state: 'limited' };
         if ([400, 401, 403, 404, 410, 416, 422, 428].includes(res.status)) return { state: 'dead', reason: 'cdn-' + res.status };
         if (!res.ok && res.status !== 206) return { state: 'unknown' };
-        reader = res.body?.getReader?.();
-        if (!reader) return { state: 'alive' };
-        const parts = [];
-        let size = 0;
-        while (size < 4096) {
-            const chunk = await reader.read();
-            if (chunk.done) break;
-            parts.push(chunk.value);
-            size += chunk.value.byteLength;
-        }
-        const bytes = Buffer.concat(parts.map(p => Buffer.from(p)));
+        const { bytes, hitEof } = await readPrefixBytes(res, 8192);
+        if (!bytes) return { state: 'alive' };
         const isDash = source.type === 'dash' || /\.mpd(?:[?#]|$)/i.test(target.pathname);
         const isHls = source.type === 'hls' || /\.m3u8(?:[?#]|$)/i.test(target.pathname);
         if (isDash) {
             const text = bytes.toString('utf8');
-            return /<(?:\w+:)?MPD\b/i.test(text) ? { state: 'alive' } : { state: 'dead', reason: 'bad-mpd' };
+            if (!/<(?:\w+:)?MPD\b/i.test(text)) return { state: 'dead', reason: 'bad-mpd' };
+            const baseMatch = (hitEof || text.includes('</BaseURL>')) ? text.match(/<BaseURL>\s*(https:\/\/[^<\s$]+)\s*<\/BaseURL>/i) : null;
+            if (baseMatch) {
+                const mediaUrl = resolveChildUrl(baseMatch[1], target);
+                if (mediaUrl && !/\/$/.test(mediaUrl.pathname)) {
+                    const hasDrm = /<(?:\w+:)?ContentProtection\b/i.test(text);
+                    return await probeMediaSegment(mediaUrl, source, hasDrm, fetchImpl, timeoutMs);
+                }
+            }
+            return { state: 'alive' };
         }
         if (isHls) {
             const text = bytes.toString('utf8').trim();
-            return /^#EXTM3U/i.test(text) ? { state: 'alive' } : { state: 'dead', reason: 'bad-m3u8' };
+            if (!/^#EXTM3U/i.test(text)) return { state: 'dead', reason: 'bad-m3u8' };
+            const childUri = firstHlsChildUri(text, hitEof);
+            if (!childUri) {
+                return /#EXT-X-ENDLIST/i.test(text) ? { state: 'dead', reason: 'empty-m3u8' } : { state: 'alive' };
+            }
+            const childUrl = resolveChildUrl(childUri, target);
+            if (!childUrl || /\.vtt(?:[?#]|$)/i.test(childUrl.pathname)) return { state: 'alive' };
+            let childRes;
+            try {
+                childRes = await fetchImpl(childUrl.href, {
+                    headers: buildProbeHeaders(childUrl, source, 'bytes=0-8191'),
+                    signal: AbortSignal.timeout(timeoutMs),
+                    redirect: 'follow'
+                });
+                if (childRes.status === 429) return { state: 'limited' };
+                if ([400, 401, 403, 404, 410, 416, 422, 428].includes(childRes.status)) return { state: 'dead', reason: 'seg-' + childRes.status };
+                if (!childRes.ok && childRes.status !== 206) return { state: 'unknown' };
+                const { bytes: childBytes, hitEof: childEof } = await readPrefixBytes(childRes, 8192);
+                if (!childBytes) return { state: 'alive' };
+                const childText = childBytes.toString('utf8').trim();
+                if (/^#EXTM3U/i.test(childText)) {
+                    const segUri = firstHlsChildUri(childText, childEof);
+                    if (!segUri) {
+                        return /#EXT-X-ENDLIST/i.test(childText) ? { state: 'dead', reason: 'empty-m3u8' } : { state: 'alive' };
+                    }
+                    const segUrl = resolveChildUrl(segUri, childUrl);
+                    if (!segUrl || /\.vtt(?:[?#]|$)/i.test(segUrl.pathname)) return { state: 'alive' };
+                    const childEncrypted = /#EXT-X-KEY:[^\r\n]*METHOD=(?!NONE)/i.test(childText);
+                    return await probeMediaSegment(segUrl, source, childEncrypted, fetchImpl, timeoutMs);
+                }
+                const parentEncrypted = /#EXT-X-KEY:[^\r\n]*METHOD=(?!NONE)/i.test(text);
+                if (looksLikeBadSegment(childBytes, childRes.headers?.get?.('Content-Type'), parentEncrypted)) {
+                    return { state: 'dead', reason: 'bad-seg' };
+                }
+                return { state: 'alive' };
+            } catch (e) {
+                return { state: 'unknown' };
+            } finally {
+                try { await childRes?.body?.cancel?.(); } catch (e) {}
+            }
         }
         if (/html|json|text\//i.test(res.headers?.get?.('Content-Type') || '')) return { state: 'dead', reason: 'not-media' };
         return looksLikeMedia(bytes) ? { state: 'alive' } : { state: 'dead', reason: 'not-media' };
     } catch (e) {
         return { state: 'unknown' };
     } finally {
-        try { if (reader) await reader.cancel(); else await res?.body?.cancel?.(); } catch (e) {}
+        try { await res?.body?.cancel?.(); } catch (e) {}
     }
 }
 

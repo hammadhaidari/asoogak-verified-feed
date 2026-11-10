@@ -156,4 +156,54 @@ test('CDN stream probe catches 403/404/428 dead streams, broken manifests, non-m
         }
     });
     assert.deepEqual(badFile, { state: 'dead', reason: 'not-media' });
+
+    // Wrapper-only HLS master playlist whose child variant segment returns 404 is caught as dead
+    const deadWrapperHls = await verifyStreamSource({
+        url: 'https://cdn.example.com/hls/master.m3u8',
+        type: 'hls',
+        headers: { Cookie: 'CloudFront-Policy=pol;CloudFront-Signature=sig;CloudFront-Key-Pair-Id=kid' }
+    }, {
+        fetchImpl: async url => {
+            assert.match(url, /Policy=pol.*Signature=sig.*Key-Pair-Id=kid/);
+            if (url.includes('master.m3u8')) {
+                return { ok: true, status: 200, body: chunkStream(Buffer.from('#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=2000000\n1080p/index.m3u8\n')) };
+            }
+            if (url.includes('1080p/index.m3u8')) {
+                return { ok: true, status: 200, body: chunkStream(Buffer.from('#EXTM3U\n#EXTINF:6.0,\nseg-001.ts\n')) };
+            }
+            return { ok: false, status: 404 };
+        }
+    });
+    assert.deepEqual(deadWrapperHls, { state: 'dead', reason: 'seg-404' });
+
+    // Valid HLS master -> variant -> MPEG-TS (0x47) segment passes
+    const tsBuf = Buffer.alloc(376, 0x11);
+    tsBuf[0] = 0x47;
+    tsBuf[188] = 0x47;
+    const liveHls = await verifyStreamSource({ url: 'https://cdn.example.com/hls/master.m3u8', type: 'hls' }, {
+        fetchImpl: async url => {
+            if (url.includes('master.m3u8')) return { ok: true, status: 200, body: chunkStream(Buffer.from('#EXTM3U\n1080p/index.m3u8\n')) };
+            if (url.includes('1080p/index.m3u8')) return { ok: true, status: 200, body: chunkStream(Buffer.from('#EXTM3U\n#EXTINF:6.0,\nseg-001.ts\n')) };
+            return { ok: true, status: 206, headers: { get: () => 'video/mp2t' }, body: chunkStream(tsBuf) };
+        }
+    });
+    assert.deepEqual(liveHls, { state: 'alive' });
+
+    // AES-128 encrypted HLS segment passes binary ciphertext, while 200 OK HTML error body fails
+    const encSeg = Buffer.alloc(256, 0x9a);
+    const liveEncryptedHls = await verifyStreamSource({ url: 'https://cdn.example.com/hls/enc.m3u8', type: 'hls' }, {
+        fetchImpl: async url => {
+            if (url.includes('enc.m3u8')) return { ok: true, status: 200, body: chunkStream(Buffer.from('#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI="k.key"\n#EXTINF:6.0,\nseg-enc.ts\n')) };
+            return { ok: true, status: 206, headers: { get: () => 'application/octet-stream' }, body: chunkStream(encSeg) };
+        }
+    });
+    assert.deepEqual(liveEncryptedHls, { state: 'alive' });
+
+    const htmlFakeSeg = await verifyStreamSource({ url: 'https://cdn.example.com/hls/fake.m3u8', type: 'hls' }, {
+        fetchImpl: async url => {
+            if (url.includes('fake.m3u8')) return { ok: true, status: 200, body: chunkStream(Buffer.from('#EXTM3U\n#EXTINF:6.0,\nseg-fake.ts\n')) };
+            return { ok: true, status: 200, headers: { get: () => 'text/html; charset=utf-8' }, body: chunkStream(Buffer.from('<!DOCTYPE html><html><body>Not Found</body></html>')) };
+        }
+    });
+    assert.deepEqual(htmlFakeSeg, { state: 'dead', reason: 'bad-seg' });
 });
