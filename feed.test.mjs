@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { feedSummary, buildQueue, buildFeed, seasonsToProbe, titleVerdict, targetFor, proofAge, slimItem, hashKey, OVERVIEW_MAX, HOT_TARGET_MS, TAIL_TARGET_MS, MIN_RECHECK_MS, DEAD_RETAIN_MS } from './feed-core.mjs';
+import { feedSummary, buildQueue, buildFeed, seasonsToProbe, titleVerdict, targetFor, proofAge, slimItem, hashKey, OVERVIEW_MAX, HOT_TARGET_MS, TAIL_TARGET_MS, MIN_RECHECK_MS, DEAD_RETAIN_MS, encodeCompactItem, decodeCompactItem, buildHotItems, buildCompactPayload } from './feed-core.mjs';
 import { classifyResolver, lightProbe, verifyStreamSource } from './light-check.mjs';
 import { resolverUrl } from './probe-shard.mjs';
 
