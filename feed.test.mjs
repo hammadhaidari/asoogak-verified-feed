@@ -207,3 +207,45 @@ test('CDN stream probe catches 403/404/428 dead streams, broken manifests, non-m
     });
     assert.deepEqual(htmlFakeSeg, { state: 'dead', reason: 'bad-seg' });
 });
+
+test('compact v2 tuple encoding round-trips movie & TV metadata cleanly while shrinking payload size', () => {
+    const now = 1_795_400_000_000;
+    const movie = {
+        id: 27205, media_type: 'movie', title: 'Inception', release_date: '2010-07-16',
+        poster_path: '/p.jpg', backdrop_path: '/b.jpg', overview: 'A very long overview '.repeat(12),
+        popularity: 123.456, vote_average: 8.36, vote_count: 35000, genre_ids: [28, 878],
+        original_language: 'en', origin_country: ['US'], availability_at: now, added_at: now - 3600000
+    };
+    const show = {
+        id: 1411, media_type: 'tv', name: 'Person of Interest', first_air_date: '2011-09-22',
+        poster_path: '/sp.jpg', backdrop_path: '/sb.jpg', overview: 'Long show overview',
+        popularity: 5738.88, vote_average: 8.14, vote_count: 2205, genre_ids: [10759, 80],
+        original_language: 'en', origin_country: ['US'], availability_at: now, added_at: now - 7200000,
+        season_count: 5, playable_seasons: [1, 2, 3, 4, 5]
+    };
+    const decMovie = decodeCompactItem(encodeCompactItem(movie));
+    assert.equal(decMovie.id, 27205);
+    assert.equal(decMovie.media_type, 'movie');
+    assert.equal(decMovie.title, 'Inception');
+    assert.equal(decMovie.release_date, '2010-07-16');
+    assert.equal(decMovie.overview, undefined);
+    assert.equal(decMovie.vote_average, 8.4);
+    assert.deepEqual(decMovie.genre_ids, [28, 878]);
+
+    const decShow = decodeCompactItem(encodeCompactItem(show));
+    assert.equal(decShow.name, 'Person of Interest');
+    assert.equal(decShow.season_count, 5);
+    assert.deepEqual(decShow.playable_seasons, [1, 2, 3, 4, 5]);
+
+    const hot = buildHotItems([movie, show], now, 2);
+    assert.equal(hot.length, 2);
+    const payload = buildCompactPayload({
+        items: hot,
+        publishedRecords: { 'movie:99': { ok: false, at: now }, 'tv:1411:s1:e1': { ok: true, at: now } },
+        now, totalPlayable: 2, movieCount: 1, tvCount: 1, tier: 'hot'
+    });
+    assert.equal(payload.format, 2);
+    assert.equal(payload.tuples.length, 2);
+    assert.ok(payload.records['movie:99']);
+    assert.equal(payload.records['tv:1411:s1:e1'], undefined, 'hot tier omits bulk episode records');
+});

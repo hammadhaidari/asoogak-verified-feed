@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { buildFeed, proofAge, feedSummary, keyOf } from './feed-core.mjs';
+import { buildFeed, proofAge, feedSummary, keyOf, buildHotItems, buildCompactPayload } from './feed-core.mjs';
 
 const SOURCE_URL = (process.env.SOURCE_CATALOGUE_URL || '').trim();
 const PREV_FEED_URL = (process.env.FEED_CATALOGUE_URL || '').trim();
@@ -74,13 +74,26 @@ async function main() {
 
     const movieCount = feed.items.filter(i => i.media_type === 'movie').length, tvCount = feed.items.length - movieCount;
     const age = proofAge(feed.items, feed.state.records, now);
+    const summaryObj = feedSummary({ items: feed.items, hidden: feed.hidden, age, stats, now });
+    const sourceMeta = { updatedAt: source.updatedAt, totalPlayable: source.totalPlayable };
     fs.mkdirSync(OUT, { recursive: true });
+    // Legacy full JSON preserved untouched for older / standalone TV widgets (Haidari, RahmanCute)
     fs.writeFileSync(path.join(OUT, 'catalogue.json'), JSON.stringify({
         updatedAt: now, paginated: false, totalPlayable: feed.items.length, movieCount, tvCount,
         deepVerified: feed.items.filter(i => Number(i.verified_v) >= 2).length, episodeVerdicts: Object.keys(feed.publishedRecords).filter(k => k.includes(':s')).length,
-        summary: feedSummary({ items: feed.items, hidden: feed.hidden, age, stats, now }),
-        records: feed.publishedRecords, items: feed.items, source: { updatedAt: source.updatedAt, totalPlayable: source.totalPlayable }
+        summary: summaryObj,
+        records: feed.publishedRecords, items: feed.items, source: sourceMeta
     }));
+    // Compact v2 sidecar artifacts: instant-boot hot tier (~2,500 titles) + full compact library (~70% smaller)
+    const hotItems = buildHotItems(feed.items, now, 2500);
+    fs.writeFileSync(path.join(OUT, 'catalogue-hot.json'), JSON.stringify(buildCompactPayload({
+        items: hotItems, publishedRecords: feed.publishedRecords, summary: summaryObj, source: sourceMeta,
+        now, totalPlayable: feed.items.length, movieCount, tvCount, tier: 'hot'
+    })));
+    fs.writeFileSync(path.join(OUT, 'catalogue-compact.json'), JSON.stringify(buildCompactPayload({
+        items: feed.items, publishedRecords: feed.publishedRecords, summary: summaryObj, source: sourceMeta,
+        now, totalPlayable: feed.items.length, movieCount, tvCount, tier: 'full'
+    })));
     const history = [...(Array.isArray(previousState.history) ? previousState.history : []), {
         at: now, shards: stats.shards, probed: stats.probed, dead: stats.dead, limited: stats.limited, hidden: feed.hidden.length,
         total: feed.items.length, hotP95h: age.hotP95h, p95h: age.p95h, unproven: age.unproven

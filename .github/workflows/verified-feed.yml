@@ -109,7 +109,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git checkout -b feed-data
-          git add catalogue.json feed-state.json
+          git add catalogue.json catalogue-hot.json catalogue-compact.json feed-state.json
           git commit -m "Verified feed ($(date -u +'%Y-%m-%dT%H:%M:%SZ'))"
           git push --force "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" feed-data
         env:
