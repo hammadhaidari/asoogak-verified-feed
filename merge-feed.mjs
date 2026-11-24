@@ -40,7 +40,6 @@ async function main() {
     const tombstoneRecords = {};
     if (tombstonesPayload && tombstonesPayload.records && typeof tombstonesPayload.records === 'object') {
         for (const [k, rec] of Object.entries(tombstonesPayload.records)) {
-            if (k === 'tv:331865' || k.startsWith('tv:331865:')) continue;
             if (rec && rec.ok === false && Number.isFinite(rec.at) && now - rec.at < 7 * 86400000) {
                 tombstoneRecords[k] = { ok: false, at: rec.at, reason: rec.reason || 'tv-dead' };
             }
