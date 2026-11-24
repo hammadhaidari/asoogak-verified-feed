@@ -6,8 +6,9 @@ export const HOT_POPULARITY = Number(process.env.HOT_POPULARITY || 15);   // top
 export const HOT_TARGET_MS = 4 * HOUR;       // popular titles are re-proven every 4h
 export const TAIL_TARGET_MS = 24 * HOUR;     // everything else daily
 export const MIN_RECHECK_MS = 2 * HOUR;      // never re-probe something proven this recently just to stay busy
-export const DEAD_RETAIN_MS = 72 * HOUR;     // a dead verdict keeps a title hidden (and is published to the TV) this long
-export const CARRY_ALIVE_MS = 72 * HOUR;     // a title the scanner dropped stays if we proved it alive this recently...
+export const DEAD_RETAIN_MS = 72 * HOUR;     // a probe dead verdict keeps a title hidden this long
+export const TOMBSTONE_RETAIN_MS = 7 * 24 * HOUR; // server-verified cloud tombstones stay hidden for 7 days unless freshly re-proven alive
+export const CARRY_ALIVE_MS = 24 * HOUR;     // a title the scanner dropped stays only 24h if we proved it alive recently...
 export const CARRY_DEEP_MS = 14 * 24 * HOUR; // ...and the scanner deep-verified it within this window
 export const OVERVIEW_MAX = 240;             // the TV already stores overviews at this length; Smart Search ranks on them, Details refetches the full text
 
@@ -58,7 +59,19 @@ export function slimItem(item) {
 /* Merge scanner items + previous feed + this run's probes into the next feed. */
 export function buildFeed({ scannerItems, scannerRecords = {}, previousItems = [], previousState = {}, shardOutputs = [], now = Date.now() }) {
     const records = {}, seasonDead = {};
-    const take = (key, rec) => { if (rec && typeof rec.ok === 'boolean' && Number.isFinite(rec.at) && (!records[key] || rec.at >= records[key].at)) records[key] = { ok: rec.ok, at: rec.at, ...(rec.reason ? { reason: rec.reason } : {}) }; };
+    const take = (key, rec) => {
+        if (!rec || typeof rec.ok !== 'boolean' || !Number.isFinite(rec.at)) return;
+        const prev = records[key];
+        if (!prev || rec.at >= prev.at) {
+            records[key] = {
+                ok: rec.ok,
+                at: rec.at,
+                ...(rec.reason ? { reason: rec.reason } : {}),
+                ...(rec.tombstone ? { tombstone: true } : {}),
+                ...(rec.verified ? { verified: true } : {})
+            };
+        }
+    };
     for (const [key, rec] of Object.entries(previousState.records || {})) take(key, rec);
     for (const [key, entry] of Object.entries(previousState.seasonDead || {})) if (entry && Array.isArray(entry.seasons)) seasonDead[key] = entry;
     for (const out of shardOutputs) {
@@ -80,8 +93,9 @@ export function buildFeed({ scannerItems, scannerRecords = {}, previousItems = [
     for (const [key, entry] of byKey) {
         const rec = records[key];
         const deepAt = Number(entry.item.availability_at) || 0;
-        // Dead unless the scanner has deep-verified it again since our dead verdict (its newer proof wins).
-        if (rec && rec.ok === false && now - rec.at < DEAD_RETAIN_MS && rec.at >= deepAt) { hidden.push({ key, at: rec.at, reason: rec.reason }); continue; }
+        // Dead unless a newer deep/segment proof superseded it; verified cloud tombstones retain for 7 days.
+        const deadWindow = (rec && (rec.tombstone || rec.verified)) ? TOMBSTONE_RETAIN_MS : DEAD_RETAIN_MS;
+        if (rec && rec.ok === false && now - rec.at < deadWindow && rec.at >= deepAt) { hidden.push({ key, at: rec.at, reason: rec.reason }); continue; }
         let item = slimItem(entry.item);
         // The TV trusts a title for 3 days from availability_at, so it must follow the freshest ALIVE proof from either repo.
         if (rec && rec.ok && rec.at > deepAt) item.availability_at = rec.at;
@@ -107,7 +121,8 @@ export function buildFeed({ scannerItems, scannerRecords = {}, previousItems = [
     // Forget what is no longer useful so state stays small: old alive records, old dead records, expired season verdicts.
     const keep = {};
     for (const [key, rec] of Object.entries(records)) {
-        if (rec.ok ? now - rec.at < 7 * 24 * HOUR : now - rec.at < DEAD_RETAIN_MS) keep[key] = rec;
+        const deadKeepMs = (rec.tombstone || rec.verified) ? TOMBSTONE_RETAIN_MS : DEAD_RETAIN_MS;
+        if (rec.ok ? now - rec.at < 7 * 24 * HOUR : now - rec.at < deadKeepMs) keep[key] = rec;
     }
     const keepSeasons = {};
     for (const [key, entry] of Object.entries(seasonDead)) if (now - entry.at < DEAD_RETAIN_MS) keepSeasons[key] = entry;

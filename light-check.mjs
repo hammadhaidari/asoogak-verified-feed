@@ -139,6 +139,37 @@ async function probeMediaSegment(segUrl, source, isEncrypted, fetchImpl, timeout
     }
 }
 
+export function extractDashSegmentUrls(mpdText, manifestUrl) {
+    const urls = [];
+    if (!mpdText || !manifestUrl) return urls;
+    const text = String(mpdText);
+    const seen = new Set();
+    const pushUrl = (raw) => {
+        const resolved = resolveChildUrl(raw, manifestUrl);
+        if (!resolved || /\/$/.test(resolved.pathname) || seen.has(resolved.href)) return;
+        seen.add(resolved.href);
+        urls.push(resolved);
+    };
+    const baseMatch = text.match(/<BaseURL>\s*([^<\s$]+)\s*<\/BaseURL>/i);
+    if (baseMatch) pushUrl(baseMatch[1].trim());
+    const repMatch = text.match(/<Representation\b[^>]*\bid="([^"]+)"/i);
+    const repId = repMatch ? repMatch[1].trim() : '0';
+    const tplTag = text.match(/<SegmentTemplate\b[^>]*>/i);
+    if (tplTag) {
+        const tag = tplTag[0];
+        const initM = tag.match(/\binitialization="([^"]+)"/i);
+        const mediaM = tag.match(/\bmedia="([^"]+)"/i);
+        const startM = tag.match(/\bstartNumber="(\d+)"/i);
+        const startNum = startM ? Number(startM[1]) : 1;
+        const fill = (tpl) => tpl
+            .replace(/\$RepresentationID\$/g, repId)
+            .replace(/\$Number(?:%0(\d+)d)?\$/g, (_, width) => width ? String(startNum).padStart(Number(width), '0') : String(startNum));
+        if (initM && !/\$Time/i.test(initM[1])) pushUrl(fill(initM[1].trim()));
+        if (mediaM && !/\$Time/i.test(mediaM[1])) pushUrl(fill(mediaM[1].trim()));
+    }
+    return urls;
+}
+
 export async function verifyStreamSource(source, { fetchImpl = fetch, timeoutMs = 9000 } = {}) {
     if (!source || !source.url) return { state: 'dead', reason: 'no-stream' };
     let res;
@@ -168,12 +199,12 @@ export async function verifyStreamSource(source, { fetchImpl = fetch, timeoutMs 
         if (isDash) {
             const text = bytes.toString('utf8');
             if (!/<(?:\w+:)?MPD\b/i.test(text)) return { state: 'dead', reason: 'bad-mpd' };
-            const baseMatch = (hitEof || text.includes('</BaseURL>')) ? text.match(/<BaseURL>\s*(https:\/\/[^<\s$]+)\s*<\/BaseURL>/i) : null;
-            if (baseMatch) {
-                const mediaUrl = resolveChildUrl(baseMatch[1], target);
-                if (mediaUrl && !/\/$/.test(mediaUrl.pathname)) {
-                    const hasDrm = /<(?:\w+:)?ContentProtection\b/i.test(text);
-                    return await probeMediaSegment(mediaUrl, source, hasDrm, fetchImpl, timeoutMs);
+            const hasDrm = /<(?:\w+:)?ContentProtection\b/i.test(text);
+            const dashTargets = extractDashSegmentUrls(text, target);
+            if (dashTargets.length) {
+                for (const segUrl of dashTargets.slice(0, 2)) {
+                    const segVerdict = await probeMediaSegment(segUrl, source, hasDrm, fetchImpl, timeoutMs);
+                    if (segVerdict.state !== 'alive') return segVerdict;
                 }
             }
             return { state: 'alive' };

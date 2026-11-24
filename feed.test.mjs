@@ -249,3 +249,38 @@ test('compact v2 tuple encoding round-trips movie & TV metadata cleanly while sh
     assert.ok(payload.records['movie:99']);
     assert.equal(payload.records['tv:1411:s1:e1'], undefined, 'hot tier omits bulk episode records');
 });
+
+test('DASH SegmentTemplate verification catches dead m4s chunks and verified tombstones retain for 7 days', async () => {
+    const mpd = '<?xml version="1.0"?><MPD><Period><AdaptationSet><Representation id="0" codecs="hev1.1.6.L120.90"><SegmentTemplate initialization="init-stream$RepresentationID$.m4s" media="chunk-stream$RepresentationID$-$Number%05d$.m4s" startNumber="1"/></Representation></AdaptationSet></Period></MPD>';
+    const ftypBytes = Buffer.alloc(200);
+    ftypBytes.write('ftyp', 4, 'latin1');
+    const seenUrls = [];
+    const deadDash = await verifyStreamSource(
+        { url: 'https://sacdn.hakunaymatata.com/m/stream.mpd', type: 'dash', headers: { Cookie: 'CloudFront-Policy=abc; CloudFront-Signature=def; CloudFront-Key-Pair-Id=K1' } },
+        {
+            fetchImpl: async url => {
+                seenUrls.push(url);
+                if (url.includes('stream.mpd')) return new Response(mpd, { status: 200, headers: { 'Content-Type': 'application/dash+xml' } });
+                if (url.includes('init-stream0.m4s')) return new Response(ftypBytes, { status: 206, headers: { 'Content-Type': 'video/mp4' } });
+                return new Response('Forbidden', { status: 403 });
+            }
+        }
+    );
+    assert.equal(deadDash.state, 'dead');
+    assert.equal(deadDash.reason, 'seg-403');
+    assert.ok(seenUrls.some(u => u.includes('init-stream0.m4s') && u.includes('Policy=abc')));
+    assert.ok(seenUrls.some(u => u.includes('chunk-stream0-00001.m4s') && u.includes('Signature=def')));
+
+    // Verified cloud tombstone stays hidden at 5 days (> 72h probe TTL, < 7d tombstone TTL)
+    const now = Date.now();
+    const fiveDaysAgo = now - 5 * 24 * 3600000;
+    const feed = buildFeed({
+        scannerItems: [
+            { id: 101, media_type: 'movie', title: 'Dead Tombstoned', popularity: 50, availability_at: fiveDaysAgo - 1000 },
+            { id: 102, media_type: 'movie', title: 'Healthy Movie', popularity: 40, availability_at: now }
+        ],
+        shardOutputs: [{ records: { 'movie:101': { ok: false, at: fiveDaysAgo, reason: 'verified:resolver-404', tombstone: true, verified: true } }, seasonDead: {} }],
+        now
+    });
+    assert.deepEqual(feed.items.map(i => i.id), [102]);
+});

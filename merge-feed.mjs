@@ -41,7 +41,7 @@ async function main() {
     if (tombstonesPayload && tombstonesPayload.records && typeof tombstonesPayload.records === 'object') {
         for (const [k, rec] of Object.entries(tombstonesPayload.records)) {
             if (rec && rec.ok === false && Number.isFinite(rec.at) && now - rec.at < 7 * 86400000) {
-                tombstoneRecords[k] = { ok: false, at: rec.at, reason: rec.reason || 'tv-dead' };
+                tombstoneRecords[k] = { ok: false, at: rec.at, reason: rec.reason || 'tv-dead', tombstone: true, verified: Boolean(rec.verified || (typeof rec.reason === 'string' && rec.reason.indexOf('verified:') === 0)) };
             }
         }
     }
